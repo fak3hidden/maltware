@@ -23,6 +23,11 @@ client that runs the official Roblox Android APK on Linux (via Flatpak,
 * **Easy integration of actions** — new launch actions are added through a
   plain JSON config file (`launcher/actions.json` or a user override at
   `~/.config/maltware/actions.json`). No rebuild required.
+* **A menu bar with a liner sweep** — *Liner → Sweep once* (or `F5`) sends a
+  thin line down the window that lights up each console line as it crosses it.
+  *Continuous sweep*, *Speed* and *Accent* live in the same menu.
+* **An in-window console** — the launcher's own event stream plus a live tail
+  of `~/.local/share/maltware/launcher.log`, toggleable from *View → Console*.
 
 ## What it is NOT
 
@@ -150,6 +155,30 @@ from untrusted sources.
 > Note: this is an *actions* system for launching things. It is not a
 > "feature module" system for game scripts, hooks, or overlays — that would
 > be the executor path this project refuses to build.
+
+## Menu bar, console and the liner
+
+The window has a menu bar: **File** (launch an action, Applications entry,
+quit), **View** (toggle the console), **Liner**, and **Help**.
+
+*Liner → Sweep once* (or `F5`) draws a 2 px line that travels from the top of
+the window to the bottom, easing in and out, with a soft glow bar behind it.
+Wherever it crosses the console it highlights the line underneath and leaves a
+one-line trail. Every part of it is a Tkinter frame placed inside the launcher
+window — no external process, no hooks, nothing outside this window.
+
+| Menu item | What it does |
+| --- | --- |
+| *Sweep once* / `F5` | one sweep, top to bottom |
+| *Continuous sweep* | repeats until *Stop* or `Esc` |
+| *Stop* / `Esc` | cancels the animation and clears the highlight |
+| *Speed* | slow (2400 ms), normal (1400 ms), fast (750 ms) |
+| *Accent* | blue, green, mauve, peach — recolours the line and its glow live |
+
+The console holds the launcher's own events (launches, Applications entry,
+update checks) plus a live tail of the launcher log; it keeps the last 400
+lines. The sweep measures the window height on every frame, so resizing
+mid-animation stays correct.
 
 ## Uninstall
 

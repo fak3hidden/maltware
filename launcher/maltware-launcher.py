@@ -14,6 +14,10 @@ What it does
   fast-forward pull).
 * Stays easy to extend: new launch actions are added through a plain JSON
   config file -- no rebuild required.
+* A menu bar and an in-window console: the *Liner* menu (or F5) sweeps an
+  animated line down the window, lighting up each console line it crosses.
+  It is pure Tkinter drawing inside this window -- it never touches the
+  Sober or Roblox process.
 
 What it does NOT do
 -------------------
@@ -556,142 +560,479 @@ def cmd_list_actions(_args):
     return 0
 
 
+# ---------------------------------------------------------------------------
+# GUI (Tkinter) — window, menu bar, console, and the liner sweep
+# ---------------------------------------------------------------------------
+
+PALETTE = {
+    "base": "#1e1e2e",
+    "mantle": "#181825",
+    "crust": "#11111b",
+    "surface": "#313244",
+    "overlay": "#45475a",
+    "text": "#cdd6f4",
+    "subtext": "#a6adc8",
+    "blue": "#89b4fa",
+    "lavender": "#b4befe",
+    "green": "#a6e3a1",
+    "mauve": "#cba6f7",
+    "peach": "#fab387",
+    "red": "#f38ba8",
+    "yellow": "#f9e2af",
+    "teal": "#94e2d5",
+}
+
+# the liner: a thin animated line that sweeps down the window
+LINER_TICK_MS = 16                                   # ~60 fps
+LINER_THICKNESS = 2                                  # px, the line itself
+LINER_GLOW = 14                                      # px, the soft bar behind it
+LINER_SPEEDS = (("slow", 2400), ("normal", 1400), ("fast", 750))
+LINER_ACCENTS = {                                    # menu name -> palette key
+    "blue": "blue",
+    "green": "green",
+    "mauve": "mauve",
+    "peach": "peach",
+}
+CONSOLE_MAX_LINES = 400                              # trim the console past this
+CONSOLE_KEEP_LINES = 200
+
+
+def ease_in_out(t):
+    """Smoothstep: 0 -> 1 with a soft start and a soft stop."""
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def liner_offset(progress, height, thickness=LINER_THICKNESS):
+    """Pixel y for the liner at eased *progress* (0..1) across *height* px."""
+    span = max(0, int(height) - int(thickness))
+    return int(round(ease_in_out(progress) * span))
+
+
+def blend_colour(a, b, t):
+    """Mix two #rrggbb colours: t=0 gives *a*, t=1 gives *b*."""
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    ca = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
+    cb = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{int(round(x + (y - x) * t)):02x}" for x, y in zip(ca, cb))
+
+
 def run_gui():
     import tkinter as tk
     from tkinter import messagebox
 
+    mono = "DejaVu Sans Mono"
+
     class LauncherApp(tk.Tk):
+        """The launcher window.
+
+        Layout: header, body (launch actions + setup/updates), and a console
+        strip along the bottom. The liner is a thin frame — plus a soft glow
+        frame behind it — placed over the whole window and animated down it;
+        every line it crosses in the console lights up as it passes.
+        """
+
         def __init__(self):
             super().__init__()
             self.title("maltware — Sober launcher")
-            self.configure(bg="#1e1e2e")
-            self.geometry("880x600")
-            self.minsize(700, 500)
+            self.configure(bg=PALETTE["base"])
+            self.geometry("920x740")
+            self.minsize(780, 620)
             self._update_running = False
 
             actions, actions_src = load_actions()
             self.actions = validate_actions(actions)
             self.actions_src = actions_src
 
-            self._build_ui()
-            # auto-check when opened (background thread)
-            self._schedule_update_check(auto=True)
+            # liner / console state
+            self.var_speed = tk.StringVar(master=self, value="normal")
+            self.var_accent = tk.StringVar(master=self, value="blue")
+            self.var_loop = tk.BooleanVar(master=self, value=False)
+            self.var_console = tk.BooleanVar(master=self, value=True)
+            self._liner_job = None
+            self._liner_active = False
+            self._liner_progress = 0.0
+            self._liner_sweeps = 0
+            self._log_pos = 0
 
+            self._build_ui()
+            self._build_menu()
+            self._bind_keys()
+            self._boot_console()
+            self._poll_log()
+            self._schedule_update_check(auto=True)
+            self.after(250, self.liner_sweep)   # intro sweep
+
+        # -- layout ------------------------------------------------------
         def _build_ui(self):
             tk.Label(
                 self, text="maltware", font=("Segoe UI", 28, "bold"),
-                bg="#1e1e2e", fg="#89b4fa",
-            ).pack(anchor="w", padx=24, pady=(20, 0))
+                bg=PALETTE["base"], fg=PALETTE["blue"],
+            ).pack(anchor="w", padx=24, pady=(18, 0))
             tk.Label(
                 self, text="Sober launcher — Roblox on Linux",
-                font=("Segoe UI", 11), bg="#1e1e2e", fg="#cdd6f4",
+                font=("Segoe UI", 11), bg=PALETTE["base"], fg=PALETTE["text"],
             ).pack(anchor="w", padx=24)
-            tk.Frame(self, bg="#89b4fa", height=2).pack(fill="x", padx=24, pady=(10, 12))
+            tk.Frame(self, bg=PALETTE["blue"], height=2).pack(fill="x", padx=24, pady=(10, 12))
 
-            body = tk.Frame(self, bg="#1e1e2e")
-            body.pack(fill="both", expand=True, padx=24, pady=(0, 12))
+            self._build_console()          # packed first: it owns the bottom
+
+            self.body = tk.Frame(self, bg=PALETTE["base"])
+            self.body.pack(fill="both", expand=True, padx=24, pady=(0, 12))
+            body = self.body
 
             # left column: launch actions
-            left = tk.Frame(body, bg="#1e1e2e")
+            left = tk.Frame(body, bg=PALETTE["base"])
             left.pack(side="left", fill="both", expand=True, padx=(0, 12))
             tk.Label(left, text="LAUNCH", font=("Segoe UI", 10, "bold"),
-                     bg="#1e1e2e", fg="#a6adc8").pack(anchor="w", pady=(0, 6))
+                     bg=PALETTE["base"], fg=PALETTE["subtext"]).pack(anchor="w", pady=(0, 6))
 
             for a in self.actions:
-                label = a["label"]
                 btn = tk.Button(
-                    left, text=label, font=("Segoe UI", 13),
-                    bg="#89b4fa" if a.get("is_default") else "#313244",
-                    fg="#1e1e2e" if a.get("is_default") else "#cdd6f4",
+                    left, text=a["label"], font=("Segoe UI", 13),
+                    bg=PALETTE["blue"] if a.get("is_default") else PALETTE["surface"],
+                    fg=PALETTE["base"] if a.get("is_default") else PALETTE["text"],
                     relief="flat", cursor="hand2", padx=18, pady=16,
-                    activebackground="#b4befe", activeforeground="#1e1e2e",
+                    activebackground=PALETTE["lavender"], activeforeground=PALETTE["base"],
                     command=lambda x=a: self._do_launch(x),
                 )
                 btn.pack(fill="x", pady=4)
                 if a.get("is_default"):
-                    btn.configure(text="▶  " + label)
+                    btn.configure(text="▶  " + a["label"])
 
             tk.Label(
                 left,
-                text="Runs Sober without injecting into or modifying it.\nNo in-game / no in-instance GUI is part of this launcher.",
-                font=("Segoe UI", 8), bg="#1e1e2e", fg="#a6adc8", justify="left",
-            ).pack(anchor="w", pady=(16, 0))
+                text=("Runs Sober without injecting into or modifying it.\n"
+                      "No in-game / no in-instance GUI is part of this launcher.\n"
+                      "The liner only draws inside this window."),
+                font=("Segoe UI", 8), bg=PALETTE["base"], fg=PALETTE["subtext"], justify="left",
+            ).pack(anchor="w", pady=(14, 0))
 
             # right column: setup / updates / menu
-            right = tk.Frame(body, bg="#181825", highlightbackground="#313244",
+            right = tk.Frame(body, bg=PALETTE["mantle"], highlightbackground=PALETTE["surface"],
                              highlightthickness=1, width=330)
             right.pack(side="right", fill="both", expand=False)
             right.pack_propagate(False)
 
             tk.Label(right, text="SETUP & UPDATES", font=("Segoe UI", 10, "bold"),
-                     bg="#181825", fg="#a6adc8").pack(anchor="w", padx=16, pady=(14, 6))
+                     bg=PALETTE["mantle"], fg=PALETTE["subtext"]).pack(anchor="w", padx=16, pady=(14, 6))
 
-            self.lbl_sober = tk.Label(right, text="Sober: checking…", bg="#181825",
-                                      fg="#94e2d5", font=("Segoe UI", 9), anchor="w")
+            self.lbl_sober = tk.Label(right, text="Sober: checking…", bg=PALETTE["mantle"],
+                                      fg=PALETTE["teal"], font=("Segoe UI", 9), anchor="w")
             self.lbl_sober.pack(fill="x", padx=16, pady=2)
-            self.lbl_repo = tk.Label(right, text="Repo: …", bg="#181825", fg="#cdd6f4",
+            self.lbl_repo = tk.Label(right, text="Repo: …", bg=PALETTE["mantle"], fg=PALETTE["text"],
                                      font=("Segoe UI", 9), anchor="w")
             self.lbl_repo.pack(fill="x", padx=16, pady=2)
-            self.lbl_update = tk.Label(right, text="Updates: checking…", bg="#181825",
-                                       fg="#f9e2af", font=("Segoe UI", 10), anchor="w")
+            self.lbl_update = tk.Label(right, text="Updates: checking…", bg=PALETTE["mantle"],
+                                       fg=PALETTE["yellow"], font=("Segoe UI", 10), anchor="w")
             self.lbl_update.pack(fill="x", padx=16, pady=6)
 
-            tk.Frame(right, bg="#313244", height=1).pack(fill="x", padx=16, pady=6)
+            tk.Frame(right, bg=PALETTE["surface"], height=1).pack(fill="x", padx=16, pady=6)
 
             tk.Label(right, text="APPLICATION MENU", font=("Segoe UI", 9, "bold"),
-                     bg="#181825", fg="#a6adc8").pack(anchor="w", padx=16, pady=(8, 2))
+                     bg=PALETTE["mantle"], fg=PALETTE["subtext"]).pack(anchor="w", padx=16, pady=(8, 2))
 
             self.btn_apps = tk.Button(
                 right,
                 text="Remove from Applications" if applications_installed() else "Add to Applications",
-                font=("Segoe UI", 10), bg="#313244", fg="#cdd6f4", relief="flat",
-                cursor="hand2", padx=8, pady=6, activebackground="#45475a",
+                font=("Segoe UI", 10), bg=PALETTE["surface"], fg=PALETTE["text"], relief="flat",
+                cursor="hand2", padx=8, pady=6, activebackground=PALETTE["overlay"],
                 command=self._toggle_applications,
             )
             self.btn_apps.pack(fill="x", padx=16, pady=(2, 6))
 
             tk.Label(right, text="CHECKS", font=("Segoe UI", 9, "bold"),
-                     bg="#181825", fg="#a6adc8").pack(anchor="w", padx=16, pady=(4, 4))
+                     bg=PALETTE["mantle"], fg=PALETTE["subtext"]).pack(anchor="w", padx=16, pady=(4, 4))
 
             tk.Button(
                 right, text="Check for updates", font=("Segoe UI", 10),
-                bg="#89b4fa", fg="#1e1e2e", relief="flat", cursor="hand2", padx=8, pady=8,
-                activebackground="#b4befe",
+                bg=PALETTE["blue"], fg=PALETTE["base"], relief="flat", cursor="hand2", padx=8, pady=8,
+                activebackground=PALETTE["lavender"],
                 command=lambda: self._schedule_update_check(auto=False),
             ).pack(fill="x", padx=16, pady=(0, 6))
 
             self.btn_apply = tk.Button(
                 right, text="Update now", font=("Segoe UI", 10, "bold"),
-                bg="#a6e3a1", fg="#1e1e2e", relief="flat", cursor="hand2",
-                padx=8, pady=8, state="disabled",
-                command=self._apply_update,
+                bg=PALETTE["green"], fg=PALETTE["base"], relief="flat", cursor="hand2",
+                padx=8, pady=8, state="disabled", command=self._apply_update,
             )
             self.btn_apply.pack(fill="x", padx=16, pady=(0, 12))
 
             tk.Label(
                 right,
                 text="Updates pull from this repository (git) and apply\nthe launcher immediately, without reinstalling.",
-                font=("Segoe UI", 8), bg="#181825", fg="#a6adc8", justify="left",
+                font=("Segoe UI", 8), bg=PALETTE["mantle"], fg=PALETTE["subtext"], justify="left",
             ).pack(anchor="w", padx=16, pady=(0, 14))
 
-        # -- logic ------------------------------------------------------
+            # the liner: placed over everything, never packed
+            accent = PALETTE[LINER_ACCENTS[self.var_accent.get()]]
+            self.liner_glow = tk.Frame(self, bg=blend_colour(accent, PALETTE["base"], 0.78), height=LINER_GLOW)
+            self.liner_core = tk.Frame(self, bg=accent, height=LINER_THICKNESS)
+            for f in (self.liner_glow, self.liner_core):
+                f.place(x=0, y=-40, relwidth=1, height=f.cget("height"))
+
+        def _build_console(self):
+            self.console_frame = tk.Frame(self, bg=PALETTE["mantle"],
+                                          highlightbackground=PALETTE["surface"], highlightthickness=1)
+            self.console_frame.pack(side="bottom", fill="x", padx=24, pady=(0, 14))
+
+            head = tk.Frame(self.console_frame, bg=PALETTE["mantle"])
+            head.pack(fill="x")
+            tk.Label(head, text="CONSOLE", font=("Segoe UI", 9, "bold"),
+                     bg=PALETTE["mantle"], fg=PALETTE["subtext"]).pack(side="left", padx=12, pady=(6, 4))
+            self.lbl_liner = tk.Label(head, text="liner · idle", font=(mono, 9),
+                                      bg=PALETTE["mantle"], fg=PALETTE["blue"])
+            self.lbl_liner.pack(side="right", padx=12)
+
+            self.console = tk.Text(
+                self.console_frame, height=9, bg=PALETTE["crust"], fg=PALETTE["text"],
+                font=(mono, 9), relief="flat", highlightthickness=0, padx=10, pady=6,
+                wrap="none", state="disabled", cursor="arrow", takefocus=0,
+                selectbackground=PALETTE["overlay"], spacing1=1,
+            )
+            self.console.pack(fill="both", expand=True)
+            self.console.tag_configure("liner", background=PALETTE["blue"], foreground=PALETTE["crust"])
+            self.console.tag_configure("liner_trail", background=PALETTE["surface"])
+            self.console.tag_configure("event", foreground=PALETTE["green"])
+            self.console.tag_configure("warn", foreground=PALETTE["yellow"])
+            self.console.tag_configure("dim", foreground=PALETTE["subtext"])
+
+        def _build_menu(self):
+            menubar = tk.Menu(self)
+
+            default = next((a for a in self.actions if a.get("is_default")), self.actions[0])
+
+            file_menu = tk.Menu(menubar, tearoff=0)
+            file_menu.add_command(label=f"Launch {default['label']}", accelerator="Ctrl+L",
+                                  command=lambda: self._do_launch(default))
+            file_menu.add_separator()
+            file_menu.add_command(
+                label="Remove from Applications" if applications_installed() else "Add to Applications",
+                command=self._toggle_applications,
+            )
+            file_menu.add_separator()
+            file_menu.add_command(label="Quit", accelerator="Ctrl+Q", command=self.destroy)
+            menubar.add_cascade(label="File", menu=file_menu)
+
+            view_menu = tk.Menu(menubar, tearoff=0)
+            view_menu.add_checkbutton(label="Console", variable=self.var_console,
+                                      command=self._toggle_console)
+            menubar.add_cascade(label="View", menu=view_menu)
+
+            liner_menu = tk.Menu(menubar, tearoff=0)
+            liner_menu.add_command(label="Sweep once", accelerator="F5", command=self.liner_sweep)
+            liner_menu.add_checkbutton(label="Continuous sweep", variable=self.var_loop,
+                                       command=self._liner_toggle_loop)
+            liner_menu.add_command(label="Stop", accelerator="Esc",
+                                   command=lambda: self._liner_stop("stopped"))
+            liner_menu.add_separator()
+
+            speed_menu = tk.Menu(liner_menu, tearoff=0)
+            for name, ms in LINER_SPEEDS:
+                speed_menu.add_radiobutton(label=f"{name}  ({ms} ms)", variable=self.var_speed,
+                                           value=name, command=self._liner_status)
+            liner_menu.add_cascade(label="Speed", menu=speed_menu)
+
+            accent_menu = tk.Menu(liner_menu, tearoff=0)
+            for name in LINER_ACCENTS:
+                accent_menu.add_radiobutton(label=name, variable=self.var_accent,
+                                            value=name, command=self._liner_recolour)
+            liner_menu.add_cascade(label="Accent", menu=accent_menu)
+
+            menubar.add_cascade(label="Liner", menu=liner_menu)
+
+            help_menu = tk.Menu(menubar, tearoff=0)
+            help_menu.add_command(label="About maltware", command=self._about)
+            menubar.add_cascade(label="Help", menu=help_menu)
+
+            self.config(menu=menubar)
+
+        def _bind_keys(self):
+            self.bind("<F5>", lambda _e: self.liner_sweep())
+            self.bind("<Escape>", lambda _e: self._liner_stop("stopped"))
+            self.bind("<Control-l>", lambda _e: self._launch_default())
+            self.bind("<Control-q>", lambda _e: self.destroy())
+
+        # -- console -----------------------------------------------------
+        def console_write(self, text, tags=(), stamp=True):
+            """Append one line to the in-window console (never to the log file)."""
+            try:
+                self.console.configure(state="normal")
+                if stamp:
+                    self.console.insert("end", time.strftime("%H:%M:%S") + "  ", ("dim",))
+                self.console.insert("end", text + "\n", tags)
+                if int(self.console.index("end-1c").split(".")[0]) > CONSOLE_MAX_LINES:
+                    self.console.delete("1.0", f"{CONSOLE_MAX_LINES - CONSOLE_KEEP_LINES}.0")
+                self.console.see("end")
+                self.console.configure(state="disabled")
+            except tk.TclError:
+                pass
+
+        def _boot_console(self):
+            self.console_write(f"maltware {VERSION} — launcher console", ("event",))
+            self.console_write(f"actions  {len(self.actions)} loaded from {self.actions_src}")
+            self.console_write("liner    Liner ▸ Sweep once, or press F5", ("dim",))
+
+        def _poll_log(self):
+            """Stream new lines from ~/.local/share/maltware/launcher.log."""
+            path = _launcher_log_path()
+            try:
+                if path.exists():
+                    size = path.stat().st_size
+                    if size < self._log_pos:      # truncated / rotated
+                        self._log_pos = 0
+                    if size > self._log_pos:
+                        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                            fh.seek(self._log_pos)
+                            chunk = fh.read()
+                            self._log_pos = fh.tell()
+                        for line in chunk.splitlines():
+                            if line.strip():
+                                self.console_write(line, ("dim",), stamp=False)
+            except OSError:
+                pass
+            if self.winfo_exists():
+                self.after(2000, self._poll_log)
+
+        def _toggle_console(self):
+            if self.var_console.get():
+                self.console_frame.pack(side="bottom", fill="x", padx=24, pady=(0, 14),
+                                        before=self.body)
+                self.console_write("console shown", ("dim",))
+            else:
+                self.console_frame.pack_forget()
+
+        # -- the liner ---------------------------------------------------
+        def liner_sweep(self, _event=None):
+            """Start one sweep from the top of the window."""
+            self._liner_cancel()
+            self.update_idletasks()
+            self._liner_active = True
+            self._liner_progress = 0.0
+            self._liner_sweeps += 1
+            self.liner_glow.place(x=0, y=-LINER_GLOW, relwidth=1, height=LINER_GLOW)
+            self.liner_core.place(x=0, y=-LINER_THICKNESS, relwidth=1, height=LINER_THICKNESS)
+            self.liner_glow.lift()
+            self.liner_core.lift()
+            self._liner_status(active=True)
+            self._liner_job = self.after(LINER_TICK_MS, self._liner_tick)
+
+        def _liner_tick(self):
+            self._liner_job = None
+            if not self._liner_active:      # stopped between frames
+                return
+            duration = dict(LINER_SPEEDS).get(self.var_speed.get(), 1400) / 1000.0
+            height = max(self.winfo_height(), LINER_THICKNESS + 1)
+            y = liner_offset(self._liner_progress, height)
+            self.liner_core.place_configure(y=y, height=LINER_THICKNESS)
+            self.liner_glow.place_configure(y=max(0, y - (LINER_GLOW - LINER_THICKNESS)),
+                                            height=LINER_GLOW)
+            self._liner_highlight(y)
+
+            self._liner_progress += (LINER_TICK_MS / 1000.0) / duration
+            if self._liner_progress >= 1.0:
+                if self.var_loop.get():
+                    self._liner_progress = 0.0
+                else:
+                    self._liner_stop()
+                    return
+            self._liner_job = self.after(LINER_TICK_MS, self._liner_tick)
+
+        def _liner_highlight(self, y):
+            """Light the console line the liner is currently crossing."""
+            try:
+                self.console.tag_remove("liner", "1.0", "end")
+                self.console.tag_remove("liner_trail", "1.0", "end")
+                cy = y - self.console.winfo_rooty()
+                if 0 <= cy < self.console.winfo_height():
+                    idx = self.console.index(f"@{6},{cy}")
+                    self.console.tag_add("liner", f"{idx} linestart", f"{idx} lineend +1c")
+                    line = int(idx.split(".")[0])
+                    if line > 1:
+                        self.console.tag_add("liner_trail", f"{line - 1}.0", f"{line - 1}.0 lineend +1c")
+            except tk.TclError:
+                pass
+
+        def _liner_cancel(self):
+            if self._liner_job is not None:
+                try:
+                    self.after_cancel(self._liner_job)
+                except tk.TclError:
+                    pass
+                self._liner_job = None
+
+        def _liner_stop(self, reason=None):
+            self._liner_cancel()
+            self._liner_active = False
+            self.liner_glow.place_forget()
+            self.liner_core.place_forget()
+            try:
+                self.console.tag_remove("liner", "1.0", "end")
+                self.console.tag_remove("liner_trail", "1.0", "end")
+            except tk.TclError:
+                pass
+            self.var_loop.set(False)
+            self._liner_status()
+            if reason:
+                self.console_write(f"liner    {reason}", ("dim",))
+
+        def _liner_toggle_loop(self):
+            if self.var_loop.get():
+                if self._liner_job is None:
+                    self.liner_sweep()
+                else:
+                    self._liner_status(active=True)
+            else:
+                self._liner_stop()
+
+        def _liner_status(self, active=False):
+            label = "looping" if active and self.var_loop.get() else ("sweeping" if active else "idle")
+            self.lbl_liner.config(
+                text=f"liner · {self.var_speed.get()} · {self.var_accent.get()} · {label}"
+            )
+
+        def _liner_recolour(self):
+            accent = PALETTE[LINER_ACCENTS[self.var_accent.get()]]
+            self.liner_core.configure(bg=accent)
+            self.liner_glow.configure(bg=blend_colour(accent, PALETTE["base"], 0.78))
+            self.console.tag_configure("liner", background=accent, foreground=PALETTE["crust"])
+            self.lbl_liner.configure(fg=accent)
+            self._liner_status(active=self._liner_job is not None)
+
+        def _about(self):
+            messagebox.showinfo(
+                "about maltware",
+                f"maltware {VERSION}\n\nA Sober launcher for Linux.\n\n"
+                "The liner sweeps a line down this window and lights up the console "
+                "line it crosses. It draws inside this window only — it never touches "
+                "the Sober or Roblox process.",
+            )
+
+        # -- launcher logic ----------------------------------------------
+        def _launch_default(self):
+            default = next((a for a in self.actions if a.get("is_default")), self.actions[0])
+            self._do_launch(default)
+
         def _do_launch(self, action):
             try:
                 pid = launch_action(action)
-                self.lbl_update.config(text=f"Launched \u201c{action['label']}\u201d", fg="#cdd6f4")
+                self.lbl_update.config(text=f"Launched \u201c{action['label']}\u201d", fg=PALETTE["text"])
+                self.console_write(f"launched {action['id']} (pid {pid})", ("event",))
             except Exception as exc:  # noqa: BLE001
+                self.console_write(f"launch failed: {exc}", ("warn",))
                 messagebox.showerror("Launch failed", str(exc))
 
         def _toggle_applications(self):
-            installed = applications_installed()
-            if installed:
+            if applications_installed():
                 remove_menu_entries()
                 self.btn_apps.configure(text="Add to Applications")
-                self.lbl_update.config(text="Removed Applications entry", fg="#cdd6f4")
+                self.lbl_update.config(text="Removed Applications entry", fg=PALETTE["text"])
+                self.console_write("applications entry removed", ("dim",))
             else:
                 install_menu_entries(entries=True)
                 self.btn_apps.configure(text="Remove from Applications")
-                self.lbl_update.config(text="Installed Applications entry", fg="#cdd6f4")
+                self.lbl_update.config(text="Installed Applications entry", fg=PALETTE["text"])
+                self.console_write("applications entry installed", ("dim",))
 
         def _schedule_update_check(self, auto=False):
             self.lbl_update.config(text="Checking…")
@@ -712,23 +1053,30 @@ def run_gui():
             self.lbl_sober.config(text=f"Sober: {sober if sober is not None else _sober_hint()}")
 
             if status == "uptodate":
-                self.lbl_update.config(text="Up to date ✓", fg="#a6e3a1")
+                self.lbl_update.config(text="Up to date ✓", fg=PALETTE["green"])
                 self.btn_apply.configure(state="disabled")
+                self.console_write(f"updates  up to date on origin/{branch}", ("dim",))
             elif status == "behind":
                 self.lbl_update.config(
                     text=f"Update available — {result.get('behind')} behind origin/{branch}",
-                    fg="#f9e2af",
+                    fg=PALETTE["yellow"],
                 )
                 self.btn_apply.configure(state="normal")
+                self.console_write(f"updates  {result.get('behind')} commit(s) behind origin/{branch}",
+                                   ("warn",))
             elif status == "offline":
-                self.lbl_update.config(text="Offline / repo unreachable", fg="#f38ba8")
+                self.lbl_update.config(text="Offline / repo unreachable", fg=PALETTE["red"])
                 self.btn_apply.configure(state="disabled")
+                self.console_write("updates  offline / repo unreachable", ("warn",))
             elif status == "not-git":
-                self.lbl_update.config(text="Not a git checkout — updates unavailable", fg="#f38ba8")
+                self.lbl_update.config(text="Not a git checkout — updates unavailable", fg=PALETTE["red"])
                 self.btn_apply.configure(state="disabled")
+                self.console_write("updates  not a git checkout", ("warn",))
             else:
-                self.lbl_update.config(text=str(result.get("reason", "Unknown status"))[:95], fg="#f38ba8")
+                self.lbl_update.config(text=str(result.get("reason", "Unknown status"))[:95],
+                                       fg=PALETTE["red"])
                 self.btn_apply.configure(state="disabled")
+                self.console_write(f"updates  {result.get('reason', 'unknown')}", ("warn",))
 
         def _apply_update(self):
             if self._update_running:
@@ -736,6 +1084,7 @@ def run_gui():
             self._update_running = True
             self.btn_apply.configure(state="disabled")
             self.lbl_update.config(text="Updating…")
+            self.console_write("updates  applying…", ("dim",))
 
             def worker():
                 result = apply_update()
@@ -747,15 +1096,20 @@ def run_gui():
             self._update_running = False
             status = result.get("status")
             if status == "updated":
-                self.lbl_update.config(text="Updated ✓", fg="#a6e3a1")
+                self.lbl_update.config(text="Updated ✓", fg=PALETTE["green"])
+                self.console_write("updates  updated", ("event",))
                 messagebox.showinfo("Update complete", result.get("reason", "Updated"))
             elif status == "refused":
-                self.lbl_update.config(text="Update blocked", fg="#f38ba8")
+                self.lbl_update.config(text="Update blocked", fg=PALETTE["red"])
+                self.console_write(f"updates  blocked: {result.get('reason', '')}", ("warn",))
                 messagebox.showwarning("Update blocked", result.get("reason", "Update blocked"))
             elif status == "uptodate":
-                self.lbl_update.config(text="Up to date ✓", fg="#a6e3a1")
+                self.lbl_update.config(text="Up to date ✓", fg=PALETTE["green"])
+                self.console_write("updates  already up to date", ("dim",))
             else:
-                self.lbl_update.config(text=str(result.get("reason", "Update failed"))[:95], fg="#f38ba8")
+                self.lbl_update.config(text=str(result.get("reason", "Update failed"))[:95],
+                                       fg=PALETTE["red"])
+                self.console_write(f"updates  failed: {result.get('reason', '')}", ("warn",))
                 messagebox.showerror("Update failed", result.get("reason", "Update failed"))
             self.btn_apply.configure(state="disabled")
             self._schedule_update_check(auto=True)  # refresh button state
