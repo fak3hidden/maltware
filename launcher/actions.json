@@ -1,0 +1,18 @@
+{
+  "actions": [
+    {
+      "id": "sober",
+      "label": "Launch Sober",
+      "command": ["flatpak", "run", "org.vinegarhq.Sober"],
+      "description": "Launch the Sober Flatpak (Roblox on Linux).",
+      "is_default": true
+    },
+    {
+      "id": "sober-install",
+      "label": "Install Sober via Flatpak",
+      "command": ["flatpak", "install", "-y", "flathub", "org.vinegarhq.Sober"],
+      "description": "Install Sober from Flathub (first-time setup).",
+      "is_default": false
+    }
+  ]
+}
