@@ -175,8 +175,16 @@ maltware/
 
 ## Troubleshooting
 
-* **No GUI / Tkinter missing** — use the CLI subcommands; install
-  `python3-tk` (Debian/Ubuntu) or your distro's `tkinter` package.
+* **Nothing opens when clicking the launcher** — the GUI opens via
+  Tkinter. On systems with no/missing Tkinter (or X/Wayland mismatch), the
+  launcher refuses to do nothing: it logs the reason to
+  `~/.local/share/maltware/launcher.log`, and then, in order, opens a
+  terminal with the CLI (`maltware-launcher status`) or an error dialog.
+  To see it directly: `maltware-launcher status`. Install `python3-tk`
+  (Debian/Ubuntu) or your distro's Tkinter package to get the GUI back.
+* **Applications menu entry missing** — see the log and the
+  `maltware-launcher status` output; check that `~/.local/share/applications/`
+  is on your XDG data path (it usually is), and refresh/log out your menu.
 * **Menu entry missing** — log out/in or press the refresh button in your
   applications menu; the entry lives in `~/.local/share/applications/`.
 * **Update says "offline"** — the launcher could not reach the origin. Check

@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -779,6 +780,101 @@ def run_gui():
 
 
 # ---------------------------------------------------------------------------
+# fallback: keep the launcher visible even when the GUI cannot start
+# ---------------------------------------------------------------------------
+
+TERMINAL_COMMANDS = [
+    ("xdg-terminal-exec", lambda cmd: ["xdg-terminal-exec", "sh", "-c", cmd]),
+    ("x-terminal-emulator", lambda cmd: ["x-terminal-emulator", "-e", "sh", "-c", cmd]),
+    ("gnome-terminal", lambda cmd: ["gnome-terminal", "--", "sh", "-c", cmd]),
+    ("konsole", lambda cmd: ["konsole", "-e", "sh", "-c", cmd]),
+    ("xfce4-terminal", lambda cmd: ["xfce4-terminal", "-x", "sh", "-c", cmd]),
+    ("mate-terminal", lambda cmd: ["mate-terminal", "--", "sh", "-c", cmd]),
+    ("lxterminal", lambda cmd: ["lxterminal", "-e", "sh", "-c", cmd]),
+    ("kitty", lambda cmd: ["kitty", "sh", "-c", cmd]),
+    ("alacritty", lambda cmd: ["alacritty", "-e", "sh", "-c", cmd]),
+    ("xterm", lambda cmd: ["xterm", "-e", "sh", "-c", cmd]),
+    ("urxvt", lambda cmd: ["urxvt", "-e", "sh", "-c", cmd]),
+]
+
+
+def _has_display():
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _launcher_log_path():
+    return Path.home() / ".local/share/maltware/launcher.log"
+
+
+def _log(msg):
+    try:
+        path = _launcher_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
+        return path
+    except Exception:
+        return None
+
+
+def _open_terminal(cmdline):
+    for binary, build in TERMINAL_COMMANDS:
+        if not shutil.which(binary):
+            continue
+        try:
+            subprocess.Popen(build(cmdline), stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _open_dialog(text):
+    try:
+        if shutil.which("zenity"):
+            subprocess.Popen(["zenity", "--error", "--title=maltware", "--text=" + text],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            return True
+        if shutil.which("yad"):
+            subprocess.Popen(["yad", "--error", "--title=maltware", "--text=" + text],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            return True
+        if shutil.which("kdialog"):
+            subprocess.Popen(["kdialog", "--error", text],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            return True
+        if shutil.which("xmessage"):
+            subprocess.Popen(["xmessage", text],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _fallback_visible(reason):
+    """Ensure *something* visible happens when the GUI cannot start."""
+    log_path = _log(reason)
+    print(f"maltware: {reason}", file=sys.stderr)
+    hint = "run `maltware-launcher status` from a terminal for details."
+    if log_path:
+        hint += f" (details in {log_path})"
+    print(f"maltware: {hint}", file=sys.stderr)
+    if _has_display():
+        # try a terminal with the CLI first (it stays visible and lets you
+        # see the error live), then a plain dialog as a last resort
+        if _open_terminal("maltware-launcher --cli status; echo; echo 'Press Enter to close...'; read -r"):
+            return 0
+        _open_dialog(reason + "\n\n" + hint)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
 
@@ -841,12 +937,12 @@ def main():
         run_gui()
         return 0
     except ModuleNotFoundError as exc:
-        print(f"GUI unavailable ({exc}); falling back to CLI.")
-        print("Install python3-tk (or the equivalent) to get the GUI.")
-        return 0
+        return _fallback_visible(
+            f"GUI unavailable ({exc}). Install tkinter (python3-tk on "
+            "Debian/Ubuntu, or your distro's tkinter package) for the GUI."
+        )
     except Exception as exc:  # noqa: BLE001
-        print(f"GUI failed to start ({exc}); falling back to CLI.")
-        return 0
+        return _fallback_visible(f"GUI failed to start: {exc}")
 
 
 if __name__ == "__main__":
