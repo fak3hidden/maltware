@@ -96,7 +96,7 @@ if [ "$MODE" = "install" ]; then
         python3 "$LAUNCHER" applications
     else
         log "installing wrapper + icon (no Applications menu entries)…"
-        python3 "$LAUNCHER" applications --no-entries --no-sober
+        python3 "$LAUNCHER" applications --no-entries
     fi
     log "copying fallback launcher to ~/.local/share/maltware/…"
     mkdir -p "$HOME/.local/share/maltware"

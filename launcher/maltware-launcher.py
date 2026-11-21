@@ -8,8 +8,7 @@ client that runs the official Roblox Android APK on Linux via Flatpak.
 What it does
 ------------
 * Launches Sober (``flatpak run org.vinegarhq.Sober``).
-* Installs/removes itself (and an optional Sober shortcut) into the
-  user's Applications menu.
+* Installs/removes itself into the user's Applications menu (one entry).
 * Auto-checks this repository for updates when the launcher opens, with a
   button to check on demand and to apply available updates (git fetch +
   fast-forward pull).
@@ -389,7 +388,7 @@ StartupNotify=false
 """
 
 
-def install_menu_entries(also_sober=True, entries=True):
+def install_menu_entries(entries=True):
     """Write the wrapper, desktop entry(ies) and icon. Idempotent."""
     wrapper = wrapper_path()
     wrapper.parent.mkdir(parents=True, exist_ok=True)
@@ -408,7 +407,6 @@ def install_menu_entries(also_sober=True, entries=True):
         ICON_DEST.write_text(FALLBACK_ICON_SVG, encoding="utf-8")
 
     launcher_desktop = None
-    sober_desktop = None
     if entries:
         DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
         launcher_desktop = DESKTOP_DIR / DESKTOP_FILE
@@ -421,20 +419,11 @@ def install_menu_entries(also_sober=True, entries=True):
             ),
             encoding="utf-8",
         )
-
-    if entries and also_sober:
-        sober_desktop = DESKTOP_DIR / DESKTOP_SOBER_FILE
-        sober_desktop.write_text(
-            _desktop_entry(
-                "Sober (via Maltware)",
-                "flatpak run org.vinegarhq.Sober",
-                str(ICON_DEST),
-                "Launch Roblox via Sober",
-                "Game;",
-            ),
-            encoding="utf-8",
-        )
-    return True, launcher_desktop, sober_desktop
+    # remove the stale Sober shortcut from older installs (no longer used)
+    stale = DESKTOP_DIR / DESKTOP_SOBER_FILE
+    if stale.exists():
+        stale.unlink()
+    return True, launcher_desktop, None
 
 
 def remove_menu_entries():
@@ -517,13 +506,10 @@ def cmd_applications(args):
         print("the wrapper script was left in ~/.local/bin/maltware-launcher")
         return 0
     entries = not args.no_entries
-    _, launcher_desktop, sober_desktop = install_menu_entries(
-        also_sober=not args.no_sober, entries=entries
-    )
+    _, launcher_desktop, _ = install_menu_entries(entries=entries)
     if entries:
         print(f"installed desktop entry: {launcher_desktop}")
-        if sober_desktop:
-            print(f"installed Sober shortcut: {sober_desktop}")
+        print("Sober opens only from the Launch Sober button in the launcher")
         print("if your menu does not refresh immediately, log out/in or press refresh in your menu")
     else:
         print("installed wrapper + icon (desktop entries skipped)")
@@ -632,22 +618,22 @@ def run_gui():
             ).pack(anchor="w", pady=(16, 0))
 
             # right column: setup / updates / menu
-            right = tk.Frame(body, bg="#181825", highlightbackground="#313244", highlightthickness=1)
-            right.pack(side="right", fill="both", expand=False, width=330)
+            right = tk.Frame(body, bg="#181825", highlightbackground="#313244",
+                             highlightthickness=1, width=330)
+            right.pack(side="right", fill="both", expand=False)
             right.pack_propagate(False)
 
             tk.Label(right, text="SETUP & UPDATES", font=("Segoe UI", 10, "bold"),
                      bg="#181825", fg="#a6adc8").pack(anchor="w", padx=16, pady=(14, 6))
 
             self.lbl_sober = tk.Label(right, text="Sober: checking…", bg="#181825",
-                                      fg="#94e2d5", font=("Segoe UI", 9), anchor="w", justify="left")
+                                      fg="#94e2d5", font=("Segoe UI", 9), anchor="w")
             self.lbl_sober.pack(fill="x", padx=16, pady=2)
             self.lbl_repo = tk.Label(right, text="Repo: …", bg="#181825", fg="#cdd6f4",
-                                     font=("Segoe UI", 9), anchor="w", justify="left", wraplength=290)
+                                     font=("Segoe UI", 9), anchor="w")
             self.lbl_repo.pack(fill="x", padx=16, pady=2)
             self.lbl_update = tk.Label(right, text="Updates: checking…", bg="#181825",
-                                       fg="#f9e2af", font=("Segoe UI", 10), anchor="w",
-                                       justify="left", wraplength=290)
+                                       fg="#f9e2af", font=("Segoe UI", 10), anchor="w")
             self.lbl_update.pack(fill="x", padx=16, pady=6)
 
             tk.Frame(right, bg="#313244", height=1).pack(fill="x", padx=16, pady=6)
@@ -701,11 +687,11 @@ def run_gui():
             if installed:
                 remove_menu_entries()
                 self.btn_apps.configure(text="Add to Applications")
-                self.lbl_update.config(text="Removed Applications entries", fg="#cdd6f4")
+                self.lbl_update.config(text="Removed Applications entry", fg="#cdd6f4")
             else:
-                install_menu_entries(also_sober=True)
+                install_menu_entries(entries=True)
                 self.btn_apps.configure(text="Remove from Applications")
-                self.lbl_update.config(text="Installed Applications entries", fg="#cdd6f4")
+                self.lbl_update.config(text="Installed Applications entry", fg="#cdd6f4")
 
         def _schedule_update_check(self, auto=False):
             self.lbl_update.config(text="Checking…")
@@ -721,9 +707,8 @@ def run_gui():
             status = result.get("status")
             repo = result.get("repo")
             branch = result.get("branch", "")
-            self.lbl_repo.config(
-                text=f"Repo: {repo if repo else '(not found)'}\nbranch: {branch}"
-            )
+            short = "/".join(repo.split("/")[-2:]) if repo else "(not found)"
+            self.lbl_repo.config(text=f"Repo: {short or '(not found)'}\nbranch: {branch}")
             self.lbl_sober.config(text=f"Sober: {sober if sober is not None else _sober_hint()}")
 
             if status == "uptodate":
@@ -900,8 +885,6 @@ def parse_args():
 
     p_apps = sub.add_parser("applications", help="install/remove desktop entries")
     p_apps.add_argument("--remove", action="store_true", help="remove desktop entries")
-    p_apps.add_argument("--no-sober", action="store_true",
-                        help="do not install the Sober shortcut")
     p_apps.add_argument("--no-entries", action="store_true",
                         help="install wrapper + icon, but no desktop entries")
 

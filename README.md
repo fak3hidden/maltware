@@ -9,8 +9,9 @@ client that runs the official Roblox Android APK on Linux (via Flatpak,
 ## What it is
 
 * **A launcher** — launches Sober and shows its status at a glance.
-* **An "Add to Applications" option** — installs a desktop entry (and icon)
-  into your applications menu, and an optional Sober shortcut.
+* **An "Add to Applications" option** — installs a single desktop entry (and
+  icon) into your applications menu. Sober opens only from the explicit
+  *Launch Sober* button inside the launcher — it never auto-starts.
 * **An auto-updater** — checks this repository for changes automatically when
   the launcher opens (background check), plus a *Check for updates* button.
   Clicking *Update now* fetches the repository and fast-forwards the checkout.
@@ -65,8 +66,7 @@ This installs:
 | Path | What |
 | --- | --- |
 | `~/.local/bin/maltware-launcher` | wrapper that execs the launcher from the checkout |
-| `~/.local/share/applications/maltware-launcher.desktop` | Applications menu entry |
-| `~/.local/share/applications/maltware-sober.desktop` | optional Sober shortcut |
+| `~/.local/share/applications/maltware-launcher.desktop` | Applications menu entry (one entry — Sober via its Launch Sober button) |
 | `~/.local/share/icons/hicolor/scalable/apps/maltware.svg` | icon |
 | `~/.config/maltware/install.json` | install config (repo pointer) |
 | `~/.local/share/maltware/` | fallback copy of the launcher (used only if the checkout moves) |
@@ -84,8 +84,8 @@ maltware-launcher update          # fast-forward the repository (if behind)
 maltware-launcher launch sober    # launch an action (default: sober)
 maltware-launcher launch <id>     # launch any action from actions.json
 maltware-launcher list-actions    # list configured actions
-maltware-launcher applications     # install wrapper + desktop entries + icon
-maltware-launcher applications --remove   # remove the desktop entries
+maltware-launcher applications           # install wrapper + desktop entry + icon
+maltware-launcher applications --remove   # remove the desktop entry
 maltware-launcher --version
 ```
 
